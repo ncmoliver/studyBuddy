@@ -1,271 +1,66 @@
 import streamlit as st
-from openai import OpenAI
-import json
-import os
-import random
-from utils.deck_functions import load_decks, save_deck, delete_deck
-from utils.quiz_functions import generate_mcq_options, check_answer_with_openai
-
-# OpenAI API Key (Make sure to set this securely)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+from utils.get_questions import generate_mcq_from_text_file
+from utils.launch_flashcards import launch_flashcard_viewer
+from utils.json_to_quiz import load_quiz, initialize_session, run_quiz, show_results
+from utils.image_to_text import extract_and_save_text_from_images
+import subprocess
+import sys
 
 
+######################### Streamlit App #########################
 
-# Load saved flashcard decks
-decks = load_decks()
 
-# Streamlit UI
-st.title("📚 Flashcard Creator & Quiz App")
+st.title("📘 Flashcard Generator")
+uploaded_images = st.sidebar.file_uploader("Upload images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-# Sidebar Navigation
-option = st.sidebar.radio("Choose an option", ["Create Flashcards", "View Decks", "Test Yourself", "Practice Multiple Choice", "Delete Deck"])
+if uploaded_images and st.sidebar.button("Extract & Save Text"):
+    output_path = extract_and_save_text_from_images(uploaded_images, "notecard_text.txt")
+    
+    with open(output_path, "r", encoding="utf-8") as f:
+        extracted_text = f.read()
 
-# ---------------------- CREATE FLASHCARDS ----------------------
-if option == "Create Flashcards":
-    st.subheader("✏️ Create a New Flashcard Deck")
 
-    deck_name = st.text_input("Enter Deck Name:")
-    question = st.text_area("Enter Question:")
-    answer = st.text_area("Enter Answer:")
+num_questions = st.number_input("Number of questions to generate", min_value=1, max_value=50, value=10)
 
-    if st.button("Add Flashcard"):
-        if deck_name and question and answer:
-            if deck_name not in decks:
-                decks[deck_name] = []
-            decks[deck_name].append({"question": question, "answer": answer})
-            save_deck(deck_name, decks[deck_name])
-            st.success(f"Flashcard added to '{deck_name}'!")
-        else:
-            st.warning("Please enter a deck name, question, and answer.")
+if st.button("Generate MCQs"):
+    mcq_output = generate_mcq_from_text_file("notecard_text.txt", num_questions)
+else:
+    mcq_output = None
 
-# ---------------------- VIEW DECKS (WITH DELETE FUNCTIONALITY) ----------------------
-elif option == "View Decks":
-    st.subheader("📂 View & Manage Flashcard Decks")
+st.subheader("🧠 Let's Start Learning")
+options = ["", "Download JSON Questions", "Flashcards", "Test Yourself"]
+user_choice = st.selectbox("Choose an option", options=options)
+if user_choice == "Download JSON Questions":
+    file_name = "mcq_output.json"
+    try:
+        with open(file_name, "r", encoding="utf-8") as f:
+            file_contents = f.read()
 
-    if decks:
-        selected_deck = st.selectbox("Select a deck", list(decks.keys()))
+        st.download_button(
+            label="📥 Download MCQs",
+            data=file_contents,  # ✅ actual content of the file
+            file_name=file_name,
+            mime="application/json"
+        )
+    except FileNotFoundError:
+        st.error(f"❌ File not found: {file_name}")
+    except Exception as e:
+        st.error(f"❌ Error reading file: {e}")
 
-        if selected_deck:
-            st.write(f"### {selected_deck} Deck")
-            updated_flashcards = decks[selected_deck].copy()
+elif user_choice == "Flashcards":
+    st.subheader("Flashcards")
+    python_cmd = sys.executable  # gets the path to current Python interpreter
+    subprocess.Popen([python_cmd, "flashcard.py", "mcq_output.json"], bufsize=1)
+    st.success("✅ Flashcard viewer launched!")
 
-            for i, flashcard in enumerate(updated_flashcards):
-                with st.expander(f"Flashcard {i+1}"):
-                    st.write(f"**Q:** {flashcard['question']}")
-                    st.write(f"**A:** {flashcard['answer']}")
-
-                    # Button to delete a specific flashcard
-                    if st.button(f"🗑️ Delete Flashcard {i+1}", key=f"del_{selected_deck}_{i}"):
-                        decks[selected_deck].remove(flashcard)
-                        save_deck(selected_deck, decks[selected_deck])
-                        st.rerun()  # Refresh the UI after deletion
-
-            # Button to delete the entire deck
-            if st.button(f"🗑️ Delete Entire '{selected_deck}' Deck", key=f"del_deck_{selected_deck}"):
-                delete_deck(selected_deck)
-                decks.pop(selected_deck, None)
-                st.rerun() # Refresh UI after deletion
+elif user_choice == "Test Yourself":
+    load_quiz("mcq_output.json")
+    initialize_session(mcq_output)
+    run_quiz()
+    if "quiz_complete" in st.session_state and st.session_state.quiz_complete:
+        show_results()
+        st.session_state.quiz_complete = False
     else:
-        st.info("No decks available. Create one in the 'Create Flashcards' tab.")
-# ---------------------- TEST YOURSELF ----------------------
-elif option == "Test Yourself":
-    st.subheader("📝 Test Yourself on a Flashcard Deck")
+        st.warning("Please complete the quiz before viewing results.")
 
-    if decks:
-        selected_deck = st.selectbox("Select a deck to test", list(decks.keys()))
-
-        num_questions = st.radio("How many questions?", [5, 10])
-
-        if selected_deck:
-            flashcards = decks[selected_deck]
-
-            if flashcards:
-                # Initialize session state for quiz progress
-                if "quiz_active" not in st.session_state:
-                    st.session_state.quiz_active = False
-                    st.session_state.current_question = 0
-                    st.session_state.selected_flashcards = []
-                    st.session_state.scores = []
-                    st.session_state.show_feedback = False
-                    st.session_state.feedback = ""
-
-                # Start the quiz
-                if not st.session_state.quiz_active:
-                    st.session_state.selected_flashcards = random.sample(flashcards, min(num_questions, len(flashcards)))
-                    st.session_state.current_question = 0
-                    st.session_state.scores = []
-                    st.session_state.quiz_active = True
-                    st.session_state.show_feedback = False
-                    st.session_state.feedback = ""
-                    st.rerun()
-
-                # Get current question
-                if st.session_state.current_question < len(st.session_state.selected_flashcards):
-                    flashcard = st.session_state.selected_flashcards[st.session_state.current_question]
-                    st.markdown(f"## **Q{st.session_state.current_question + 1}:** {flashcard['question']}")
-                    user_answer = st.text_input("Your Answer:", key=f"answer_{st.session_state.current_question}")
-
-                    # Show feedback only if the user has submitted an answer
-                    if st.button("Submit Answer", key=f"submit_{st.session_state.current_question}"):
-                        feedback = check_answer_with_openai(flashcard['question'], user_answer, flashcard['answer'])
-
-                        # Extract correctness percentage
-                        correctness_percentage = 0
-                        for line in feedback.split("\n"):
-                            if line.startswith("Correctness:"):
-                                correctness_percentage = int(line.replace("Correctness:", "").strip().replace("%", ""))
-                        
-                        # Save score and feedback
-                        st.session_state.scores.append(correctness_percentage)
-                        st.session_state.feedback = feedback
-                        st.session_state.show_feedback = True
-                        st.rerun()
-
-                    # Display feedback after submission
-                    if st.session_state.show_feedback:
-                        st.write(st.session_state.feedback)
-
-                        # Button to move to next question
-                        if st.button("Next Question"):
-                            st.session_state.current_question += 1
-                            st.session_state.show_feedback = False
-                            st.session_state.feedback = ""
-                            st.rerun()
-
-                else:
-                    # Quiz Completed - Calculate final score
-                    avg_score = sum(st.session_state.scores) / len(st.session_state.scores)
-
-                    # Determine Grade
-                    if avg_score >= 90:
-                        grade = "A"
-                    elif avg_score >= 80:
-                        grade = "B"
-                    elif avg_score >= 70:
-                        grade = "C"
-                    elif avg_score >= 60:
-                        grade = "D"
-                    else:
-                        grade = "F"
-
-                    st.write(f"### Quiz Completed! Your Final Score: {avg_score:.2f}% ({grade})")
-
-                    # Reset Quiz
-                    if st.button("Restart Quiz"):
-                        st.session_state.quiz_active = False
-                        st.rerun()
-    else:
-        st.info("No decks available. Create one in the 'Create Flashcards' tab.")
-
-
-# ---------------------- TEST YOURSELF WITH MCQ ----------------------
-elif option == "Practice Multiple Choice":
-    st.subheader("📝 Practice Multiple Choice Questions")
-
-    if decks:
-        selected_deck = st.selectbox("Select a deck to practice", list(decks.keys()))
-
-        difficulty = st.radio("Select Difficulty", ["Easy", "Medium", "Hard"])
-
-        if selected_deck:
-            flashcards = decks[selected_deck]
-
-            if flashcards:
-                # Initialize session state
-                if "quiz_active" not in st.session_state:
-                    st.session_state.quiz_active = False
-                    st.session_state.current_question = 0
-                    st.session_state.selected_flashcards = []
-                    st.session_state.scores = []
-                    st.session_state.show_feedback = False
-                    st.session_state.feedback = ""
-                    st.session_state.answer_choices = []
-
-                if not st.session_state.quiz_active:
-                    st.session_state.selected_flashcards = random.sample(flashcards, min(5, len(flashcards)))
-                    st.session_state.current_question = 0
-                    st.session_state.scores = []
-                    st.session_state.quiz_active = True
-                    st.session_state.show_feedback = False
-                    st.session_state.feedback = ""
-                    st.session_state.answer_choices = []
-                    st.rerun()
-
-                # Get the current question
-                if st.session_state.current_question < len(st.session_state.selected_flashcards):
-                    flashcard = st.session_state.selected_flashcards[st.session_state.current_question]
-                    with st.container():
-                        st.markdown(f"## **Q{st.session_state.current_question + 1}:** {flashcard['question']}", unsafe_allow_html=True)
-
-                        # Generate unique MCQ options
-                        options = generate_mcq_options(flashcard["answer"], flashcards)
-                        st.session_state.answer_choices = options
-
-                        user_answer = st.selectbox("Select an Answer:", options, key=f"answer_{st.session_state.current_question}")
-
-                    if st.button("Submit Answer", key=f"submit_{st.session_state.current_question}"):
-                        feedback = check_answer_with_openai(flashcard['question'], user_answer, flashcard['answer'], api_key=OPENAI_API_KEY)
-
-                        # Extract correctness percentage
-                        correctness_percentage = 0
-                        for line in feedback.split("\n"):
-                            if line.startswith("Correctness:"):
-                                correctness_percentage = int(line.replace("Correctness:", "").strip().replace("%", ""))
-                        
-                        st.session_state.scores.append(correctness_percentage)
-                        st.session_state.feedback = feedback
-                        st.session_state.show_feedback = True
-                        st.rerun()
-
-                    # Display feedback after submission
-                    if st.session_state.show_feedback:
-                        st.write(st.session_state.feedback)
-
-                        # Button to move to next question
-                        if st.button("Next Question"):
-                            st.session_state.current_question += 1
-                            st.session_state.show_feedback = False
-                            st.session_state.feedback = ""
-                            st.rerun()
-
-                else:
-                    # Quiz Completed - Calculate final score
-                    avg_score = sum(st.session_state.scores) / len(st.session_state.scores)
-
-                    # Determine Grade
-                    if avg_score >= 90:
-                        grade = "A"
-                    elif avg_score >= 80:
-                        grade = "B"
-                    elif avg_score >= 70:
-                        grade = "C"
-                    elif avg_score >= 60:
-                        grade = "D"
-                    else:
-                        grade = "F"
-
-                    st.write(f"### Quiz Completed! Your Final Score: {avg_score:.2f}% ({grade})")
-
-                    # Reset Quiz
-                    if st.button("Restart Quiz"):
-                        st.session_state.quiz_active = False
-                        st.rerun()
-
-    else:
-        st.info("No decks available. Create one in the 'Create Flashcards' tab.")
-
-
-
-# ---------------------- DELETE DECK ----------------------
-elif option == "Delete Deck":
-    st.subheader("🗑️ Delete a Flashcard Deck")
-
-    if decks:
-        selected_deck = st.selectbox("Select a deck to delete", list(decks.keys()))
-        if st.button(f"Delete '{selected_deck}'"):
-            delete_deck(selected_deck)
-            decks.pop(selected_deck, None)
-            st.success(f"Deleted deck '{selected_deck}' successfully!")
-    else:
-        st.info("No decks available.")
 
