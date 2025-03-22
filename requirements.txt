@@ -1,0 +1,8 @@
+streamlit
+openai
+dotenv
+base64
+PIL
+io
+random
+json
